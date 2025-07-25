@@ -1,0 +1,400 @@
+#!/bin/sh
+
+#*******************************************************************************************
+# @file:       tradelog
+# @author:     Martin Balaz <xbalaz15@stud.fit.vutbr.cz>
+# @course:     Operacni systemy
+# @date:       2021
+# @brief:      Skript pro analyzu obchodnich logu burzy
+# 
+#*******************************************************************************************/
+
+export POSIXLY_CORRECT=yes
+export LC_NUMERIC=en.US.UTF-8
+
+#HELP FUNKCE
+print_help()
+{
+  echo "
+Usage: tradelog [-h | --help]"
+  echo "       tradelog [FILTER...] [COMMAND] [LOG[LOG2...]]"
+  echo "
+PŘÍKAZ může být jeden z:
+    list-tick – výpis seznamu vyskytujících se burzovních symbolů, tzv. \"tickerů\".
+    profit – výpis celkového zisku z uzavřených pozic.
+    pos – výpis hodnot aktuálně držených pozic seřazených sestupně dle hodnoty.
+    last-price – výpis poslední známé ceny pro každý ticker.
+    hist-ord – výpis histogramu počtu transakcí dle tickeru.
+    graph-pos – výpis grafu hodnot držených pozic dle tickeru.
+
+FILTR může být kombinace následujících:
+    -a DATETIME – after: jsou uvažovány pouze záznamy PO tomto datu (bez tohoto data). DATETIME je formátu YYYY-MM-DD HH:MM:SS.
+    -b DATETIME – before: jsou uvažovány pouze záznamy PŘED tímto datem (bez tohoto data).
+    -t TICKER – jsou uvažovány pouze záznamy odpovídající danému tickeru. Při více výskytech přepínače se bere množina všech uvedených tickerů.
+    -w WIDTH – u výpisu grafů nastavuje jejich šířku, tedy délku nejdelšího řádku na WIDTH. Tedy, WIDTH musí být kladné celé číslo. Více výskytů přepínače je chybné spuštění.
+    "
+}
+
+#DEKLARACE PROMENNYCH
+WIDTH="0"
+TICKER=""
+COMMAND=""
+DATETIME=""
+DATETIME2=""
+LOG_FILES=""
+READ_INPUT=""
+GZ_LOG_FILES=""
+READ_LIST_TICK=""
+ALL_ARGUMENTS="$*"
+NUMBER_OF_ARGUMENTS="$#"
+
+#PROCHAZENI ARGUMENTU A UKLADANI DO PROMENNYCH
+while [ "$#" -gt 0 ]; do
+ case "$1" in
+  -h | --help)
+    print_help
+    exit 0
+    ;;
+  list-tick | profit | pos | last-price | hist-ord | graph-pos)
+    COMMAND="$1"
+    shift
+    ;;
+  -a)
+    DATETIME="$2|$DATETIME"
+    shift
+    shift
+    ;;
+  -b)
+    DATETIME2="$2|$DATETIME2"
+    shift
+    shift
+    ;;
+  -t)
+    TICKER="$2"
+    shift
+    shift
+    ;;
+  -w)
+    WIDTH="$2"
+    shift
+    shift
+    ;;
+  *.log)
+    LOG_FILES="$LOG_FILES $1"
+    LOG_FILES_PIPE="$LOG_FILES_PIPE"
+    shift
+    ;;
+  *.log.gz)
+    GZ_LOG_FILES="$GZ_LOG_FILES $1"
+    GZ_LOG_FILES_PIPE="$GZ_LOG_FILES_PIPE"
+    shift
+    ;;
+  esac
+done
+
+#TATO CAST KODU SLOUZI PRO PRIKAZY TOHOTO TYPU (S PIPOU): cat stock-2.log | ./tradelog list-tick -t V ...
+if [ -z "$LOG_FILES" ] && [ -z "$GZ_LOG_FILES" ] ; then
+
+#PODMINKY POUZE PRO CTENI ZE SOUBORU
+if [ "$NUMBER_OF_ARGUMENTS" -lt 1 ] ; then
+if [ -n "$LOG_FILES_PIPE" ] ; then
+  READ_INPUT=$(cat "$LOG_FILES_PIPE")
+  echo "$READ_INPUT"
+elif [ -n "$GZ_LOG_FILES_PIPE" ] ; then
+  READ_INPUT=$(gzip -d -c "$GZ_LOG_FILES_PIPE")
+  echo "$READ_INPUT"
+else
+  READ_INPUT=$(cat)
+  echo "$READ_INPUT"
+fi
+else
+#PODMINKY PRO CTENI Z VICE SOUBORU I S FILTRAMA
+if [ -n "$LOG_FILES_PIPE" ] && [ -z "$GZ_LOG_FILES_PIPE" ] ; then
+  READ_INPUT=$(cat "$LOG_FILES_PIPE")
+elif [ -n "$GZ_LOG_FILES_PIPE" ] && [ -z "$LOG_FILES_PIPE" ] ; then
+  READ_INPUT=$(gzip -d -c "$GZ_LOG_FILES_PIPE")
+elif [ -n "$LOG_FILES_PIPE" ] && [ -n "$GZ_LOG_FILES_PIPE" ] ; then
+  READ_INPUT=$(gzip -d -c "$GZ_LOG_FILES_PIPE" | cat "$LOG_FILES_PIPE" -)
+else
+  READ_INPUT=$(cat)
+fi
+fi
+
+###############FILTRY###################
+#TICKERS
+if [ -n "$TICKER" ] ; then
+    READ_INPUT=$(echo "$READ_INPUT" | awk -F ';' -v ALLARGUMENTS="$ALL_ARGUMENTS" 'BEGIN{split(ALLARGUMENTS, a, " ")} ; {for (i in a) {if($2 == a[i]) print $0}}')
+fi
+#AFTER_DATE
+if [ -n "$DATETIME" ] ; then
+    READ_AFTER_DATE=$(echo "$READ_INPUT" | awk -F ';' -v DATETIME="$DATETIME" \
+    'BEGIN{split(DATETIME, datetime, "|")} ; {max = 0 ; for (i in datetime) {if(max < datetime[i]) max = datetime[i]}} END{print max}')
+    READ_INPUT=$(echo "$READ_INPUT" | awk -F ';' -v DATETIME="$READ_AFTER_DATE" '{if($1 > DATETIME) {print $0}}')
+fi
+#BEFORE_DATE
+if [ -n "$DATETIME2" ] ; then
+    READ_BEFORE_DATE=$(echo "$READ_INPUT" | awk -F ';' -v DATETIME="$DATETIME2" \
+    'BEGIN{len = split(DATETIME, datetime, "|")} { max = datetime[1] ; for(i = 1; i < len; i++) {if(max > datetime[i]) max = datetime[i]}} END{print max}')
+    READ_INPUT=$(echo "$READ_INPUT" | awk -F ';' -v DATETIME2="$READ_BEFORE_DATE" '{if($1 < DATETIME2) { print $0 }}')
+fi
+#WIDTH
+if [ "$WIDTH" != 0 ] ; then
+  if [ "$COMMAND" != "hist-ord" ] && [ "$COMMAND" != "graph-pos" ] ; then
+    echo "Filtr [-w] (WIDTH) se používá jen pro příkazy hist-ord nebo graph-pos"
+    exit 1;
+  elif [ "$WIDTH" -lt 0 ] ; then
+    echo "Filtr [-w] (WIDTH) nesmí být záporný"
+    exit 1;
+  fi
+fi
+#FILTERS WITHOUT COMMAND
+if [ -z "$COMMAND" ] && [ "$NUMBER_OF_ARGUMENTS" -gt 1 ] ; then
+    echo "$READ_INPUT"
+fi
+
+#####PROMENNE JEDNOTLIVYCH PRIKAZU######
+#LIST-TICK!!!!
+READ_LIST_TICK=$(echo "$READ_INPUT" | awk -F ';' '!a[$2]++''{print $2}' | sort)
+
+#PROFIT!!!!
+READ_PROFIT=$(echo "$READ_INPUT" | awk -F ';' '{printf("%s;%.2f\n", $3, $4 * $6)}' | awk -F ';' '{a[$1] += $2} END{printf("%.2f\n", a["sell"] - a["buy"])}')
+
+#LAST-PRICE!!!!
+READ_LAST_PRICE=$(echo "$READ_INPUT" | sort -t ';' -k2,2 -k1,1r | sort -t ';' -k2,2 -u | awk -F ';' '{max = (length($4) > max ? length($4) : max)} END{print max}')
+READ_LAST_PRICE=$(echo "$READ_INPUT" | sort -t ';' -k2,2 -k1,1r | sort -t ';' -k2,2 -u | awk -F ';' -v dvojtecka=':' -v max="$READ_LAST_PRICE" '{printf("%-10s%c %*.2f\n",$2, dvojtecka, max, $4)}')
+
+#HIST-ORD!!!!
+READ_MAX_HIST_ORD=$(echo "$READ_INPUT" | awk -F ';' '{print $2}' | sort | uniq -c | awk -F ' ' -v dvojtecka=':' '{max = ($1 > max ? $1 : max)} END{print max}')
+READ_WIDTH=$(echo "$READ_INPUT" | awk -v max="$READ_MAX_HIST_ORD" -v width="$WIDTH" 'END{if(width == 0) width = max ; width = max/width ; {printf("%.100f", width)}}')
+READ_HIST_ORD=$(echo "$READ_INPUT" | awk -F ';' '{print $2}' | sort | uniq -c | awk -F ' ' -v dvojtecka=':' -v max="$READ_MAX" -v width="$READ_WIDTH" \
+'{
+printf("%-10s%c ", $2, dvojtecka)
+for(n = 1; n <= ($1 / width); n++) printf "#"
+printf "\n"
+}')
+
+#POS!!!!
+READ_VARIABLE_OF_TICKERS=$(echo "$READ_INPUT" | awk -F ';' '!a[$2]++''{print $2}' | sort | awk '{var = var $0 "|"} END{print var}')
+READ_POS=$(echo "$READ_INPUT" | awk -F ';' -v dvojtecka=':' -v TICKERS="$READ_VARIABLE_OF_TICKERS" \
+'BEGIN{
+  ticks = split(TICKERS, arr, "|")
+}
+{
+  for(i = 1; i < ticks; i++) if($2 == arr[i])
+  {
+    if($3 == "buy") sum[i] += $6
+    else if($3 == "sell") sum[i] -= $6
+    lastprice[i] = $4
+  }
+}
+END{
+  for(i = 1; i < ticks; i++){
+    var = sprintf("%.2f", lastprice[i] * sum[i])
+    var2 = int(length(var))
+    if(max < var2) max = var2
+  }
+  for(i = 1; i < ticks; i++) printf("%-10s%c %*.2f\n", arr[i], dvojtecka, max, lastprice[i] * sum[i])
+}' | sort -t ':' -nr -k2,2)
+
+#GRAPH-POS!!!!
+READ_MAX_GRAPH_POS=$(echo "$READ_POS" | awk -F ':' \
+'function abs(v) {return v < 0 ? -v : v}
+BEGIN{max = 0}
+{value = $2 ; value = abs(value) ; if(value > max) max = value}
+END{print max}')
+READ_GRAPH_POS=$(echo "$READ_POS" | awk -F ':' -v dvojtecka=':' -v max="$READ_MAX_GRAPH_POS" -v width="$WIDTH" \
+'{
+  if(width == 0) base = 1000
+  else base = int(max / width)
+  printf("%-10s%c",$1, dvojtecka)
+  if($2 > 0)
+  {
+    for(n = 0; n < int($2 / base); n++){
+      if(n == 0) printf(" ")
+        printf "#"
+      }
+    }
+  else if($2 < 0)
+  {
+    for(n = int($2 / base); n < 0; n++){
+      if(n == int($2 / base)) printf(" ")
+        printf "!"
+    }
+  } printf "\n"
+}' | sort -k1,1)
+
+##############PRIKAZY###################
+#LIST-TICK
+if [ "$COMMAND" = "list-tick" ] ; then
+  echo "$READ_LIST_TICK"
+#PROFIT
+elif [ "$COMMAND" = "profit" ]; then
+  echo "$READ_PROFIT"
+#POS
+elif [ "$COMMAND" = "pos" ] ; then
+  echo "$READ_POS"
+#LAST-PRICE
+elif [ "$COMMAND" = "last-price" ] ; then
+  echo "$READ_LAST_PRICE"
+#HIST-ORD
+elif [ "$COMMAND" = "hist-ord" ] ; then
+  echo "$READ_HIST_ORD"
+#GRAPH-POS
+elif [ "$COMMAND" = "graph-pos" ] ; then
+  echo "$READ_GRAPH_POS"
+fi
+
+
+#TATO CAS KODU JE URCENA PRO NORMALNI ZADAVANI PRIKAZU (BEZ PIPY), NAPR: ./tradelog -t V -t GOOG profit stock-2.log
+elif [ -n "$LOG_FILES" ] || [ -n "$GZ_LOG_FILES" ] ; then
+
+#PODMINKY POUZE PRO CTENI ZE SOUBORU
+if [ "$NUMBER_OF_ARGUMENTS" -le 1 ] ; then
+if [ -n "$LOG_FILES" ] ; then
+  READ_INPUT="cat $LOG_FILES"
+  eval "$READ_INPUT"
+elif [ -n "$GZ_LOG_FILES" ] ; then
+  READ_INPUT="gzip -d -c $GZ_LOG_FILES"
+  eval "$READ_INPUT"
+else
+  READ_INPUT="cat"
+  eval "$READ_INPUT"
+fi
+else
+#PODMINKY PRO CTENI Z VICE SOUBORU I S FILTRAMA
+if [ -n "$LOG_FILES" ] && [ -z "$GZ_LOG_FILES" ] ; then
+  READ_INPUT="cat $LOG_FILES"
+elif [ -n "$GZ_LOG_FILES" ] && [ -z "$LOG_FILES" ] ; then
+  READ_INPUT="gzip -d -c $GZ_LOG_FILES"
+elif [ -n "$LOG_FILES" ] && [ -n "$GZ_LOG_FILES" ] ; then
+  READ_INPUT="gzip -d -c $GZ_LOG_FILES | cat $LOG_FILES -"
+else
+  READ_INPUT="cat"
+fi
+fi
+
+###############FILTRY###################
+#TICKERS
+if [ -n "$TICKER" ] ; then
+    READ_INPUT="eval $READ_INPUT | awk -F ';' 'BEGIN{split(\"$ALL_ARGUMENTS\", a, \" \")} ; {for (i in a) {if(\$2 == a[i]) print \$0}}'"
+fi
+#AFTER_DATE
+if [ -n "$DATETIME" ] ; then
+    READ_AFTER_DATE=$(eval "$READ_INPUT" | awk -F ';' -v DATETIME="$DATETIME" \
+    'BEGIN{split(DATETIME, datetime, "|")} ; {max = 0 ; for (i in datetime) {if(max < datetime[i]) max = datetime[i]}} END{print max}')
+    READ_INPUT="eval $READ_INPUT | awk -F ';' -v DATETIME=\"$READ_AFTER_DATE\" '{if(\$1 > DATETIME) {print \$0}}'"
+fi
+#BEFORE_DATE
+if [ -n "$DATETIME2" ] ; then
+    READ_BEFORE_DATE=$(eval "$READ_INPUT" | awk -F ';' -v DATETIME="$DATETIME2" \
+    'BEGIN{len = split(DATETIME, datetime, "|")} { max = datetime[1] ; for(i = 1; i < len; i++) {if(max > datetime[i]) max = datetime[i]}} END{print max}')
+    READ_INPUT="eval $READ_INPUT | awk -F ';' -v DATETIME2=\"$READ_BEFORE_DATE\" '{if(\$1 < DATETIME2) { print \$0 }}' "
+fi
+#WIDTH
+if [ "$WIDTH" != 0 ] ; then
+  if [ "$COMMAND" != "hist-ord" ] && [ "$COMMAND" != "graph-pos" ] ; then
+    echo "Filtr [-w] (WIDTH) se používá jen pro příkazy hist-ord nebo graph-pos"
+    exit 1;
+  elif [ "$WIDTH" -lt 0 ] ; then
+    echo "Filtr [-w] (WIDTH) nesmí být záporný"
+    exit 1;
+  fi
+fi
+#FILTERS WITHOUT COMMAND
+if [ -z "$COMMAND" ] && [ "$NUMBER_OF_ARGUMENTS" -gt 1 ] ; then
+    eval "$READ_INPUT"
+fi
+
+#####PROMENNE JEDNOTLIVYCH PRIKAZU######
+#LIST-TICK!!!!
+READ_LIST_TICK="eval $READ_INPUT | awk -F ';' '!a[\$2]++''{print \$2}' | sort"
+
+#PROFIT!!!!
+READ_PROFIT="eval $READ_INPUT | awk -F ';' '{printf(\"%s;%.2f\n\", \$3, \$4 * \$6)}' | awk -F ';' '{a[\$1] += \$2} END{printf(\"%.2f\n\", a[\"sell\"] - a[\"buy\"])}'"
+
+#LAST-PRICE!!!!
+READ_LAST_PRICE=$(eval "$READ_INPUT" | sort -t ';' -k2,2 -k1,1r | sort -t ';' -k2,2 -u | awk -F ';' '{max = (length($4) > max ? length($4) : max)} END{print max}')
+READ_LAST_PRICE=$(eval "$READ_INPUT" | sort -t ';' -k2,2 -k1,1r | sort -t ';' -k2,2 -u | awk -F ';' -v dvojtecka=':' -v max="$READ_LAST_PRICE" '{printf("%-10s%c %*.2f\n",$2, dvojtecka, max, $4)}')
+
+#HIST-ORD!!!!
+READ_MAX_HIST_ORD=$(eval "$READ_INPUT" | awk -F ';' '{print $2}' | sort | uniq -c | awk -F ' ' -v dvojtecka=':' '{max = ($1 > max ? $1 : max)} END{print max}')
+READ_WIDTH=$(eval "$READ_INPUT" | awk -v max="$READ_MAX_HIST_ORD" -v width="$WIDTH" 'END{if(width == 0) width = max ; width = max/width ; {printf("%.100f", width)}}')
+READ_HIST_ORD="eval $READ_INPUT | awk -F ';' '{print \$2}' | sort | uniq -c | awk -F ' ' -v dvojtecka=':' -v max=\"$READ_MAX\" -v width=\"$READ_WIDTH\" \
+'{
+printf(\"%-10s%c \", \$2, dvojtecka)
+for(n = 1; n <= (\$1 / width); n++) printf \"#\"
+printf \"\n\"
+}'"
+
+#POS!!!!
+READ_VARIABLE_OF_TICKERS=$(eval "$READ_INPUT" | awk -F ';' '!a[$2]++''{print $2}' | sort | awk '{var = var $0 "|"} END{print var}')
+READ_POS="eval $READ_INPUT | awk -F ';' -v dvojtecka=':' -v TICKERS=\"$READ_VARIABLE_OF_TICKERS\" \
+'BEGIN{
+  ticks = split(TICKERS, arr, \"|\")
+}
+{
+  for(i = 1; i < ticks; i++) if(\$2 == arr[i])
+  {
+    if(\$3 == \"buy\") sum[i] += \$6
+    else if(\$3 == \"sell\") sum[i] -= \$6
+    lastprice[i] = \$4
+  }
+}
+END{
+  for(i = 1; i < ticks; i++){
+    var = sprintf(\"%.2f\", lastprice[i] * sum[i])
+    var2 = int(length(var))
+    if(max < var2) max = var2
+  }
+  for(i = 1; i < ticks; i++) printf(\"%-10s%c %*.2f\n\", arr[i], dvojtecka, max, lastprice[i] * sum[i])
+}' | sort -t ':' -nr -k2,2"
+
+#GRAPH-POS!!!!
+READ_MAX_GRAPH_POS=$(eval "$READ_POS" | awk -F ':' \
+'function abs(v) {return v < 0 ? -v : v}
+BEGIN{max = 0}
+{value = $2 ; value = abs(value) ; if(value > max) max = value}
+END{print max}')
+READ_GRAPH_POS="eval $READ_POS | awk -F ':' -v dvojtecka=':' -v max=\"$READ_MAX_GRAPH_POS\" -v width=\"$WIDTH\" \
+'{
+  if(width == 0) base = 1000
+  else base = int(max / width)
+  printf(\"%-10s%c\",\$1, dvojtecka)
+  if(\$2 > 0)
+  {
+    for(n = 0; n < int(\$2 / base); n++){
+      if(n == 0) printf(\" \")
+        printf \"#\"
+      }
+    }
+  else if(\$2 < 0)
+  {
+    for(n = int(\$2 / base); n < 0; n++){
+      if(n == int(\$2 / base)) printf(\" \")
+        printf \"!\"
+    }
+  } printf \"\n\"
+}' | sort -k1,1"
+
+##############PRIKAZY###################
+#LIST-TICK
+if [ "$COMMAND" = "list-tick" ] ; then
+  eval "$READ_LIST_TICK"
+#PROFIT
+elif [ "$COMMAND" = "profit" ]; then
+  eval "$READ_PROFIT"
+#POS
+elif [ "$COMMAND" = "pos" ] ; then
+  eval "$READ_POS"
+#LAST-PRICE
+elif [ "$COMMAND" = "last-price" ] ; then
+  echo "$READ_LAST_PRICE"
+#HIST-ORD
+elif [ "$COMMAND" = "hist-ord" ] ; then
+  eval "$READ_HIST_ORD"
+#GRAPH-POS
+elif [ "$COMMAND" = "graph-pos" ] ; then
+  eval "$READ_GRAPH_POS"
+fi
+
+fi
